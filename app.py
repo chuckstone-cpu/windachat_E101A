@@ -4,11 +4,13 @@ AI Teaching Agent - Interactive Learning Assistant
 
 import streamlit as st
 from document_tree_builder import build_document_tree
+from rag_engine import RAGEngine 
 import requests
 import io
 from pypdf import PdfReader
 import time
 
+# --- HELPER FUNCTIONS ---
 
 def search_and_download_pdf(book_title):
     """Search for and download a PDF from open sources."""
@@ -41,7 +43,6 @@ def search_and_download_pdf(book_title):
     
     return None, None
 
-
 def load_pdf_from_file(uploaded_file):
     """Load PDF from uploaded file."""
     try:
@@ -56,7 +57,6 @@ def load_pdf_from_file(uploaded_file):
         return pdf_text_list
     except Exception as e:
         raise Exception(f"Error reading PDF file: {str(e)}")
-
 
 def load_pdf_from_book_name(book_name):
     """Load PDF by searching and downloading from the internet."""
@@ -79,7 +79,6 @@ def load_pdf_from_book_name(book_name):
     except Exception as e:
         raise Exception(f"Error loading PDF: {str(e)}")
 
-
 def add_message(role, content, metadata=None):
     """Add a message to the chat history."""
     if 'messages' not in st.session_state:
@@ -91,7 +90,6 @@ def add_message(role, content, metadata=None):
         'metadata': metadata,
         'timestamp': time.time()
     })
-
 
 def render_section_content(section_data):
     """Render the content of a selected section."""
@@ -112,72 +110,50 @@ def render_section_content(section_data):
     else:
         st.info("_This section serves as a container or header and has no direct text content._")
 
-
 def toggle_node(node_id):
-    """Toggle the expanded/collapsed state of a tree node."""
     if node_id in st.session_state.expanded_nodes:
         st.session_state.expanded_nodes.remove(node_id)
     else:
         st.session_state.expanded_nodes.add(node_id)
 
-
 def recursive_tree_renderer(sections, level=0, path_prefix="root"):
-    """
-    Recursively renders the tree using indented buttons and custom state management.
-    Replacing 'st.expander' to avoid nesting errors.
-    """
-    # Define indentation spacing (Em Spaces to prevent trimming)
+    """Recursively renders the tree using indented buttons."""
     indent_unit = "  " 
     current_indent = indent_unit * level
 
     for idx, section in enumerate(sections):
-        # Create a unique ID for this specific node position
         node_id = f"{path_prefix}.{idx}"
-        
         has_children = len(section.get('subsections', [])) > 0
         
         if has_children:
-            # Check if currently expanded
             is_expanded = node_id in st.session_state.expanded_nodes
-            
-            # Icons
             state_icon = "▼" if is_expanded else "▶"
             type_icon = "📂" if section.get('is_wrapper') else "📑"
-            
-            # Label
             label = f"{current_indent}{state_icon} {type_icon} {section['header']} (Pg. {section['page_number']})"
             
-            # Parent Node Button (Toggles expansion)
             if st.button(label, key=f"btn_node_{node_id}", use_container_width=True):
                 toggle_node(node_id)
                 st.rerun()
             
-            # If expanded, render children
             if is_expanded:
-                # OPTIONAL: If the parent node ITSELF has content, show a "View This Section" button
                 if section.get('content_chunks'):
                     content_indent = current_indent + indent_unit
                     content_label = f"{content_indent}📄 View Content: {section['header']}"
-                    
                     if st.button(content_label, key=f"btn_view_{node_id}", use_container_width=True):
                         st.session_state.selected_section = section
                         add_message('user', f"Show me: {section['header']}")
                         add_message('assistant', f"Here's the content for **{section['header']}**:", metadata='section_content')
                         st.rerun()
                 
-                # Render children recursively
                 recursive_tree_renderer(section['subsections'], level + 1, path_prefix=node_id)
         
         else:
-            # Leaf Node (No children)
             label = f"{current_indent}📄 {section['header']} (Pg. {section['page_number']})"
-            
             if st.button(label, key=f"btn_leaf_{node_id}", use_container_width=True):
                 st.session_state.selected_section = section
                 add_message('user', f"Show me: {section['header']}")
                 add_message('assistant', f"Here's the content for **{section['header']}**:", metadata='section_content')
                 st.rerun()
-
 
 def initialize_session_state():
     """Initialize session state variables."""
@@ -186,7 +162,8 @@ def initialize_session_state():
         add_message('assistant', 
                    "👋 Hello! I'm your AI Teaching Agent.\n\n"
                    "📚 **Load a document** - Upload PDF or search for a book\n"
-                   "🔍 **Navigate structure** - Browse the interactive tree\n\n"
+                   "🔍 **Navigate structure** - Browse the interactive tree\n"
+                   "🎮 **Quiz Mode** - Test your knowledge in the sidebar!\n\n"
                    "How would you like to start?")
     
     if 'document_loaded' not in st.session_state:
@@ -199,10 +176,16 @@ def initialize_session_state():
     if 'selected_section' not in st.session_state:
         st.session_state.selected_section = None
         
-    # NEW: Track expanded nodes for the custom tree view
     if 'expanded_nodes' not in st.session_state:
         st.session_state.expanded_nodes = set()
 
+    # --- RAG Engine ---
+    if 'rag_engine' not in st.session_state:
+        st.session_state.rag_engine = RAGEngine()
+
+    # --- Quiz State ---
+    if 'quiz_data' not in st.session_state:
+        st.session_state.quiz_data = None
 
 def process_user_message(user_input):
     """Process user messages."""
@@ -219,18 +202,18 @@ def process_user_message(user_input):
         return "navigation_view"
     
     elif 'help' in user_input_lower:
-        return "I can help you explore documents! Try saying 'Load a document' or 'Show structure'."
+        return "I can help you explore documents! Try saying 'Load a document', 'Show structure', or check the Quiz button in the sidebar."
     
     else:
         if not st.session_state.document_loaded:
             return "Please load a document first (Say 'load document')."
-        return "You can ask me to navigate the structure or show specific sections."
-
+        
+        # --- Use RAG to answer! ---
+        return st.session_state.rag_engine.generate_answer(user_input)
 
 def main():
     st.set_page_config(page_title="AI Teaching Agent", page_icon="🎓", layout="wide")
     
-    # Custom CSS to align text left in buttons (looks more like a tree)
     st.markdown("""
         <style>
         .stButton>button { 
@@ -241,43 +224,97 @@ def main():
         .stButton>button:hover {
             border: 1px solid #ccc;
         }
+        /* Style for the Quiz Box */
+        .quiz-box { padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px; background-color: #f9f9f9; }
         </style>
     """, unsafe_allow_html=True)
     
     initialize_session_state()
     
-    # Sidebar
+    # --- SIDEBAR ---
     with st.sidebar:
         st.title("🎓 Teaching Agent")
         uploaded_file = st.file_uploader("Upload PDF", type=['pdf'], key="pdf_uploader")
         
         if uploaded_file and not st.session_state.document_loaded:
-            with st.spinner("Processing tree structure..."):
+            with st.spinner("Processing PDF Structure & Indexing..."):
                 try:
                     pdf_text_list = load_pdf_from_file(uploaded_file)
-                    # Pass the PDF text to builder
-                    document_tree = build_document_tree(pdf_text_list)
                     
+                    # 1. Build Tree
+                    document_tree = build_document_tree(pdf_text_list)
                     st.session_state.document_tree = document_tree
+                    
+                    # 2. Ingest into RAG
+                    st.session_state.rag_engine.ingest_document(pdf_text_list)
+
                     st.session_state.document_loaded = True
                     st.session_state.awaiting_input = None
                     
-                    add_message('assistant', f"✅ Loaded '{uploaded_file.name}'! Ask me to show the structure.")
+                    add_message('assistant', f"✅ Loaded '{uploaded_file.name}'! Ask me anything about it.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
         
         if st.session_state.document_loaded:
             st.success("✅ Document Active")
-            if st.button("🔄 Reset"):
-                st.session_state.document_loaded = False
-                st.session_state.document_tree = None
-                st.session_state.expanded_nodes = set()
+            
+            st.divider()
+            st.subheader("🎮 Gamification")
+            
+            # --- QUIZ BUTTON ---
+            if st.button("🧠 Generate Quiz Question", use_container_width=True):
+                with st.spinner("Generating question..."):
+                    quiz = st.session_state.rag_engine.generate_quiz_question()
+                    if "error" in quiz:
+                        st.error(quiz["error"])
+                    else:
+                        st.session_state.quiz_data = quiz
+                        st.rerun()
+
+            if st.button("🔄 Reset App"):
+                st.session_state.clear()
                 st.rerun()
 
-    # Main Chat
+    # --- MAIN CHAT AREA ---
     st.title("🤖 AI Teaching Agent")
     
+    # --- QUIZ DISPLAY SECTION ---
+    if st.session_state.quiz_data:
+        quiz = st.session_state.quiz_data
+        
+        with st.container():
+            st.info("🧠 **Knowledge Check**")
+            st.markdown(f"**Q: {quiz['question']}**")
+            
+            # Display Options
+            user_choice = st.radio("Choose an answer:", quiz['options'], index=None)
+            
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                # Check Answer Button
+                if st.button("Submit Answer"):
+                    if user_choice:
+                        # Extract the letter (A, B, C...) from the choice "A) Option..."
+                        chosen_letter = user_choice.split(")")[0]
+                        correct_letter = quiz['correct_answer']
+                        
+                        if chosen_letter == correct_letter:
+                            st.success(f"✅ Correct! {quiz['explanation']}")
+                        else:
+                            st.error(f"❌ Incorrect. The correct answer was **{correct_letter}**.")
+                            st.write(f"**Reason:** {quiz['explanation']}")
+                    else:
+                        st.warning("Please select an option first.")
+            
+            with col2:
+                 # Button to close quiz
+                if st.button("Close Quiz"):
+                    st.session_state.quiz_data = None
+                    st.rerun()
+        st.divider()
+
+    # --- CHAT & TREE VIEW ---
     chat_container = st.container()
     
     with chat_container:
@@ -285,7 +322,6 @@ def main():
             with st.chat_message(message['role']):
                 st.write(message['content'])
                 
-                # Navigation View
                 if message.get('metadata') == 'navigation_view' and st.session_state.document_tree:
                     st.markdown("---")
                     st.markdown("### 🗂️ Document Structure")
@@ -295,17 +331,15 @@ def main():
                     sections = tree.get('sections', [])
                     
                     if sections:
-                        # Call the custom recursive renderer
                         recursive_tree_renderer(sections)
                     else:
                         st.warning("No sections detected.")
                 
-                # Section Content View
                 elif message.get('metadata') == 'section_content' and st.session_state.selected_section:
                     render_section_content(st.session_state.selected_section)
                     st.session_state.selected_section = None
 
-    # Input Area
+    # --- INPUT AREA ---
     if prompt := st.chat_input("Type message..."):
         add_message('user', prompt)
         with st.chat_message('user'):
@@ -318,12 +352,18 @@ def main():
                 with st.spinner(f"Downloading '{prompt}'..."):
                     try:
                         pdf_text, title = load_pdf_from_book_name(prompt)
+                        
+                        # 1. Build Tree
                         tree = build_document_tree(pdf_text)
                         st.session_state.document_tree = tree
+                        
+                        # 2. Ingest into RAG
+                        st.session_state.rag_engine.ingest_document(pdf_text)
+
                         st.session_state.document_loaded = True
                         st.session_state.awaiting_input = None
                         
-                        msg = f"✅ Downloaded '{title}'! Ask to show structure."
+                        msg = f"✅ Downloaded '{title}'! Ask questions or view structure."
                         add_message('assistant', msg)
                         st.write(msg)
                         st.rerun()
